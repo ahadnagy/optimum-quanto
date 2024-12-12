@@ -48,6 +48,8 @@ extra_cflags = ["-g", "-O3"]
 extra_cuda_cflags = [
     "--expt-extended-lambda",
     "--use_fast_math",
+    "-lineinfo",
+    '-O0'
 ]
 # We need to know the minimum CUDA Arch to select only the relevant kernels
 # but we cannot rely on __CUDA_ARCH__ as it is not set in host code (only on device code)

@@ -12,15 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 from helpers import device_eq, random_qweight
 from tensor.weights.weight_helpers import check_weight_qtensor_linear
 
-from optimum.quanto import qint4
+from optimum.quanto import qint4, quantize_weight, MaxOptimizer, AbsmaxOptimizer
 from optimum.quanto.library.extensions import is_extension_available
 from optimum.quanto.tensor.weights import WeightQBitsTensor
 from optimum.quanto.tensor.weights.marlin.int4 import MarlinInt4WeightQBitsTensor
+from helpers import assert_similar
 
 
 @pytest.mark.skipif(
@@ -131,16 +134,15 @@ def test_marlin_int4_weight_qbits_tensor_linear(batch_size, tokens, in_features,
     )
 
 
-@pytest.mark.xfail(reason="Bug in Marlin kernel", strict=False)
+#@pytest.mark.xfail(reason="Bug in Marlin kernel", strict=False)
 @pytest.mark.skipif(
     not is_extension_available("quanto_cuda") or torch.cuda.get_device_capability()[0] < 8,
     reason="CUDA >= sm80 not available",
 )
-@pytest.mark.parametrize("batch_size", [1, 2])
-@pytest.mark.parametrize("tokens", [48, 64])
-# @pytest.mark.parametrize("in_features", [1024, 2048, 4096, 16384])
-@pytest.mark.parametrize("in_features", [4096, 16384])
-@pytest.mark.parametrize("out_features", [2048, 4096])
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("tokens", [64])
+@pytest.mark.parametrize("in_features", [16384])
+@pytest.mark.parametrize("out_features", [4096])
 def test_marlin_int4_weight_qbits_tensor_linear_failing(batch_size, tokens, in_features, out_features):
     dtype = torch.float16
     weight_qtype = qint4
@@ -148,3 +150,56 @@ def test_marlin_int4_weight_qbits_tensor_linear_failing(batch_size, tokens, in_f
     _test_marlin_int4_weight_qbits_tensor_linear(
         dtype, weight_qtype, group_size, batch_size, tokens, in_features, out_features, use_bias=False
     )
+
+def identity_qweight(n, qtype, dtype=torch.float32, axis=0, group_size=None, device="cpu"):
+    t = torch.eye(n, n, dtype=dtype, device=device)
+    if qtype.bits == 8:
+        scale = AbsmaxOptimizer()(t, qtype=qtype, axis=axis)
+        shift = None
+    else:
+        scale, shift = MaxOptimizer()(t, qtype=qtype, axis=axis, group_size=group_size)
+    return quantize_weight(t, qtype=qtype, axis=axis, scale=scale, shift=shift, group_size=group_size, optimized=False)
+
+
+def compare_tensors(tensor1, tensor2):
+    if tensor1.shape != tensor2.shape:
+        raise ValueError("Tensors must have the same shape for comparison.")
+
+    # Find indices where the tensors differ
+    diff_indices = torch.nonzero(tensor1 != tensor2, as_tuple=False)
+    if diff_indices.numel() == 0:
+        return []
+    else:
+        return diff_indices.tolist()
+
+def test_identity_matrix_through_linear_layer():
+    dtype = torch.float16
+    weight_qtype = qint4
+    group_size = 128
+
+    # Set the dimensions
+    n = 16384
+
+    qbt = identity_qweight(
+        n, weight_qtype, dtype, group_size=group_size, device=torch.device("cuda")
+    )
+    marlin_qweight = MarlinInt4WeightQBitsTensor(
+        qtype=qbt.qtype,
+        axis=qbt.axis,
+        group_size=qbt._group_size,
+        size=qbt.size(),
+        stride=qbt.stride(),
+        data=qbt._data.unpack(),
+        scale=qbt._scale,
+        shift=qbt._shift,
+    )
+
+    inputs = torch.ones((1, 64, n), dtype=dtype, device=torch.device("cuda"))
+    import numpy as np
+
+    qout1 = torch.nn.functional.linear(inputs, marlin_qweight, None)
+    qout2 = torch.nn.functional.linear(inputs, marlin_qweight, None)
+    diff = qout1-qout2
+    print(f"Differing indices: {len(compare_tensors(qout1, qout2))}")
+    np.savetxt('diff.out', np.hstack(diff.cpu().numpy()), fmt="%d", delimiter=',')
+    assert torch.allclose(qout1, qout2, atol=1e-2), "Output matrices match"

@@ -41,6 +41,7 @@ class Extension(object):
                             f"{self.name} was compiled with pytorch {pytorch_build_version}, but {torch.__version__} is installed: it will be recompiled."
                         )
             os.makedirs(self.build_directory, exist_ok=True)
+            os.environ["MAX_JOBS"] = "3"
             self._lib = load(
                 name=self.name,
                 sources=self.sources,
